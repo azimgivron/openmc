@@ -6,6 +6,7 @@ from math import sqrt, pi, sin, cos, isclose
 from numbers import Real
 import warnings
 import operator
+import inspect
 
 import numpy as np
 from scipy.spatial import ConvexHull, Delaunay
@@ -13,6 +14,7 @@ from scipy.spatial import ConvexHull, Delaunay
 import openmc
 from openmc.checkvalue import (check_greater_than, check_value, check_less_than,
                                check_iterable_type, check_length, check_type)
+import openmc.surface
 
 
 class CompositeSurface(ABC):
@@ -96,10 +98,20 @@ class CylinderSector(CompositeSurface):
         the sector. Defaults to 'z'.
     **kwargs : dict
         Keyword arguments passed to the :class:`Cylinder` and
-        :class:`Plane` constructors.
+        :class:`Plane` constructors. Specific keyword arguments 
+        can be passed using surfaces names as keys, i.e.
+        'outer_cyl', 'inner_cyl', 'plane1', 'plane2'.
 
     Attributes
     ----------
+    theta1 : float
+        Clockwise-most bound of sector in degrees. Assumed to be in the
+        counterclockwise direction with respect to the first basis axis
+        (+y, +z, or +x). Must be less than :attr:`theta2`.
+    theta2 : float
+        Counterclockwise-most bound of sector in degrees. Assumed to be in the
+        counterclockwise direction with respect to the first basis axis
+        (+y, +z, or +x). Must be greater than :attr:`theta1`.
     outer_cyl : openmc.ZCylinder, openmc.YCylinder, or openmc.XCylinder
         Outer cylinder surface.
     inner_cyl : openmc.ZCylinder, openmc.YCylinder, or openmc.XCylinder
@@ -127,6 +139,9 @@ class CylinderSector(CompositeSurface):
 
         if theta2 <= theta1:
             raise ValueError('theta2 must be greater than theta1.')
+        
+        self.theta1 = theta1
+        self.theta2 = theta2
 
         phi1 = pi / 180 * theta1
         phi2 = pi / 180 * theta2
@@ -141,27 +156,49 @@ class CylinderSector(CompositeSurface):
         p3_plane2 = np.array([r2 * cos(phi2) + center[0], r2 * sin(phi2)+ center[1], 0.])
 
         points = [p1, p2_plane1, p3_plane1, p2_plane2, p3_plane2]
+
+        surface_kwargs_names = list(
+            inspect.signature(openmc.Surface.__init__).parameters.keys()
+        )[1:] #exclude self
+        subkwargs = {k:v for k, v in kwargs.items() if k in surface_kwargs_names}
+
+        inner_cyl_kwargs = kwargs.get("inner_cyl", subkwargs)
+        outer_cyl_kwargs = kwargs.get("outer_cyl", subkwargs)
         if axis == 'z':
             coord_map = [0, 1, 2]
-            self.inner_cyl = openmc.ZCylinder(*center, r1, **kwargs)
-            self.outer_cyl = openmc.ZCylinder(*center, r2, **kwargs)
+            self.inner_cyl = openmc.ZCylinder(*center, r1, **inner_cyl_kwargs)
+            self.outer_cyl = openmc.ZCylinder(*center, r2, **outer_cyl_kwargs)
         elif axis == 'y':
-            coord_map = [0, 2, 1]
-            self.inner_cyl = openmc.YCylinder(*center, r1, **kwargs)
-            self.outer_cyl = openmc.YCylinder(*center, r2, **kwargs)
+            coord_map = [1, 2, 0]
+            self.inner_cyl = openmc.YCylinder(*center, r1, **inner_cyl_kwargs)
+            self.outer_cyl = openmc.YCylinder(*center, r2, **outer_cyl_kwargs)
         elif axis == 'x':
             coord_map = [2, 0, 1]
-            self.inner_cyl = openmc.XCylinder(*center, r1, **kwargs)
-            self.outer_cyl = openmc.XCylinder(*center, r2, **kwargs)
+            self.inner_cyl = openmc.XCylinder(*center, r1, **inner_cyl_kwargs)
+            self.outer_cyl = openmc.XCylinder(*center, r2, **outer_cyl_kwargs)
 
         # Reorder the points to correspond to the correct central axis
         for p in points:
             p[:] = p[coord_map]
 
+        plane1_kwargs = kwargs.get("plane1", subkwargs)
+        plane2_kwargs = kwargs.get("plane2", subkwargs)
         self.plane1 = openmc.Plane.from_points(p1, p2_plane1, p3_plane1,
-                                               **kwargs)
+                                               **plane1_kwargs)
         self.plane2 = openmc.Plane.from_points(p1, p2_plane2, p3_plane2,
-                                               **kwargs)
+                                               **plane2_kwargs)
+        
+    @property
+    def angular_aperture(self):
+        return self.theta1 - self.theta2
+    
+    @property
+    def inner_radius(self):
+        return self.inner_cyl.r
+
+    @property
+    def outer_radius(self):
+        return self.outer_cyl.r
 
     @classmethod
     def from_theta_alpha(cls,
@@ -199,7 +236,9 @@ class CylinderSector(CompositeSurface):
             of the sector. Defaults to 'z'.
         **kwargs : dict
             Keyword arguments passed to the :class:`Cylinder` and
-            :class:`Plane` constructors.
+            :class:`Plane` constructors. Specific keyword arguments 
+            can be passed using surfaces names as keys, i.e.
+            'outer_cyl', 'inner_cyl', 'plane1', 'plane2'.
 
         Returns
         -------
@@ -254,14 +293,23 @@ class IsogonalOctagon(CompositeSurface):
         of cm. Must be less than :math:`r_2\sqrt{2}`.
     r2 : float
         Half-width of octagon across its basis axis intersecting sides in
-        units of cm. Must be less than than :math:`r_1\sqrt{2}`.
+        units of cm. Must be less than :math:`r_1\sqrt{2}`.
     axis : {'x', 'y', 'z'}
         Central axis of octagon. Defaults to 'z'
     **kwargs
-        Keyword arguments passed to underlying plane classes
+        Keyword arguments passed to underlying plane classes. 
+        Specific keyword arguments can be passed using surfaces
+        names as keys, i.e. 'top', 'bottom', 'upper_right',
+        'lower_left', 'right', 'left', 'lower_right', 'upper_left'.
 
     Attributes
     ----------
+    half_width1 : float
+        Half-width of octagon across its basis axis-parallel sides in units
+        of cm. Must be less than :math:`r_2\sqrt{2}`.
+    half_width2 : float
+        Half-width of octagon across its basis axis intersecting sides in
+        units of cm. Must be less than :math:`r_1\sqrt{2}`.
     top : openmc.ZPlane, openmc.XPlane, or openmc.YPlane
         Top planar surface of octagon
     bottom : openmc.ZPlane, openmc.XPlane, or openmc.YPlane
@@ -286,9 +334,11 @@ class IsogonalOctagon(CompositeSurface):
                       'right', 'left',
                       'lower_right', 'upper_left')
 
-    def __init__(self, center, r1, r2, axis='z', **kwargs):
-        c1, c2 = center
+    def __init__(self, center, r1, r2, axis='z', **kwargs):        
+        self.half_width1 = r1
+        self.half_width2 = r2
 
+        c1, c2 = center
         # Coordinates for axis-perpendicular planes
         cright = c1 + r1
         cleft = c1 - r1
@@ -325,26 +375,36 @@ class IsogonalOctagon(CompositeSurface):
 
         points = [p1_ur, p2_ur, p3_ur, p1_lr, p2_lr, p3_lr,
                   p1_ll, p2_ll, p3_ll, p1_ul, p2_ul, p3_ul]
-
+        
+        surface_kwargs_names = list(
+            inspect.signature(openmc.Surface.__init__).parameters.keys()
+        )[1:] #exclude self
+        subkwargs = {k:v for k, v in kwargs.items() if k in surface_kwargs_names}
+        
+        top_kwargs = kwargs.get("top", subkwargs)
+        bottom_kwargs = kwargs.get("bottom", subkwargs)
+        right_kwargs = kwargs.get("right", subkwargs)
+        left_kwargs = kwargs.get("left", subkwargs)
+        
         # Orientation specific variables
         if axis == 'z':
             coord_map = [0, 1, 2]
-            self.top = openmc.YPlane(ctop, **kwargs)
-            self.bottom = openmc.YPlane(cbottom, **kwargs)
-            self.right = openmc.XPlane(cright, **kwargs)
-            self.left = openmc.XPlane(cleft, **kwargs)
+            self.top = openmc.YPlane(ctop, **top_kwargs)
+            self.bottom = openmc.YPlane(cbottom, **bottom_kwargs)
+            self.right = openmc.XPlane(cright, **right_kwargs)
+            self.left = openmc.XPlane(cleft, **left_kwargs)
         elif axis == 'y':
             coord_map = [0, 2, 1]
-            self.top = openmc.ZPlane(ctop, **kwargs)
-            self.bottom = openmc.ZPlane(cbottom, **kwargs)
-            self.right = openmc.XPlane(cright, **kwargs)
-            self.left = openmc.XPlane(cleft, **kwargs)
+            self.top = openmc.ZPlane(ctop, **top_kwargs)
+            self.bottom = openmc.ZPlane(cbottom, **bottom_kwargs)
+            self.right = openmc.XPlane(cright, **right_kwargs)
+            self.left = openmc.XPlane(cleft, **left_kwargs)
         elif axis == 'x':
             coord_map = [2, 0, 1]
-            self.top = openmc.ZPlane(ctop, **kwargs)
-            self.bottom = openmc.ZPlane(cbottom, **kwargs)
-            self.right = openmc.YPlane(cright, **kwargs)
-            self.left = openmc.YPlane(cleft, **kwargs)
+            self.top = openmc.ZPlane(ctop, **top_kwargs)
+            self.bottom = openmc.ZPlane(cbottom, **bottom_kwargs)
+            self.right = openmc.YPlane(cright, **right_kwargs)
+            self.left = openmc.YPlane(cleft, **left_kwargs)
         self.axis = axis
 
         # Put our coordinates in (x,y,z) order and add the offset
@@ -353,14 +413,19 @@ class IsogonalOctagon(CompositeSurface):
             p[1] += c2
             p[:] = p[coord_map]
 
+        upper_right_kwargs = kwargs.get("upper_right", subkwargs)
+        lower_right_kwargs = kwargs.get("lower_right", subkwargs)
+        lower_left_kwargs = kwargs.get("lower_left", subkwargs)
+        upper_left_kwargs = kwargs.get("upper_left", subkwargs)
+
         self.upper_right = openmc.Plane.from_points(p1_ur, p2_ur, p3_ur,
-                                                    **kwargs)
+                                                    **upper_right_kwargs)
         self.lower_right = openmc.Plane.from_points(p1_lr, p2_lr, p3_lr,
-                                                    **kwargs)
+                                                    **lower_right_kwargs)
         self.lower_left = openmc.Plane.from_points(p1_ll, p2_ll, p3_ll,
-                                                   **kwargs)
+                                                   **lower_left_kwargs)
         self.upper_left = openmc.Plane.from_points(p1_ul, p2_ul, p3_ul,
-                                                   **kwargs)
+                                                   **upper_left_kwargs)
 
     def __neg__(self):
         if self.axis == 'y':
@@ -412,10 +477,16 @@ class RightCircularCylinder(CompositeSurface):
     lower_fillet_radius : float
         Lower edge fillet radius in [cm].
     **kwargs
-        Keyword arguments passed to underlying cylinder and plane classes
+        Keyword arguments passed to underlying cylinder and plane classes.
+        Specific keyword arguments can be passed using surfaces
+        names as keys, i.e. 'cyl', 'bottom', 'top'.
 
     Attributes
     ----------
+    height : float
+        Height of the cylinder
+    radius : float
+        Radius of the cylinder
     cyl : openmc.Cylinder
         Underlying cylinder surface
     bottom : openmc.Plane
@@ -456,23 +527,34 @@ class RightCircularCylinder(CompositeSurface):
         check_type('lower_fillet_radius', lower_fillet_radius, float)
         check_less_than('lower_fillet_radius', lower_fillet_radius,
                         radius, equality=True)
+        self.height = height
+        self.radius = radius
 
+        surface_kwargs_names = list(
+            inspect.signature(openmc.Surface.__init__).parameters.keys()
+        )[1:] #exclude self
+        subkwargs = {k:v for k, v in kwargs.items() if k in surface_kwargs_names}
+
+        cyl_kwargs = kwargs.get("cyl", subkwargs)
+        bottom_kwargs = kwargs.get("bottom", subkwargs)
+        top_kwargs = kwargs.get("top", subkwargs)
+        
         if axis == 'x':
-            self.cyl = openmc.XCylinder(y0=cy, z0=cz, r=radius, **kwargs)
-            self.bottom = openmc.XPlane(x0=cx, **kwargs)
-            self.top = openmc.XPlane(x0=cx + height, **kwargs)
+            self.cyl = openmc.XCylinder(y0=cy, z0=cz, r=radius, **cyl_kwargs)
+            self.bottom = openmc.XPlane(x0=cx, **bottom_kwargs)
+            self.top = openmc.XPlane(x0=cx + height, **top_kwargs)
             x1, x2 = 'y', 'z'
             axcoord, axcoord1, axcoord2 = 0, 1, 2
         elif axis == 'y':
-            self.cyl = openmc.YCylinder(x0=cx, z0=cz, r=radius, **kwargs)
-            self.bottom = openmc.YPlane(y0=cy, **kwargs)
-            self.top = openmc.YPlane(y0=cy + height, **kwargs)
+            self.cyl = openmc.YCylinder(x0=cx, z0=cz, r=radius, **cyl_kwargs)
+            self.bottom = openmc.YPlane(y0=cy, **bottom_kwargs)
+            self.top = openmc.YPlane(y0=cy + height, **top_kwargs)
             x1, x2 = 'x', 'z'
             axcoord, axcoord1, axcoord2 = 1, 0, 2
         elif axis == 'z':
-            self.cyl = openmc.ZCylinder(x0=cx, y0=cy, r=radius, **kwargs)
-            self.bottom = openmc.ZPlane(z0=cz, **kwargs)
-            self.top = openmc.ZPlane(z0=cz + height, **kwargs)
+            self.cyl = openmc.ZCylinder(x0=cx, y0=cy, r=radius, **cyl_kwargs)
+            self.bottom = openmc.ZPlane(z0=cz, **bottom_kwargs)
+            self.top = openmc.ZPlane(z0=cz + height, **top_kwargs)
             x1, x2 = 'x', 'y'
             axcoord, axcoord1, axcoord2 = 2, 0, 1
 
@@ -610,7 +692,10 @@ class RectangularParallelepiped(CompositeSurface):
     zmin, zmax : float
         Minimum and maximum z coordinates of the parallelepiped
     **kwargs
-        Keyword arguments passed to underlying plane classes
+        Keyword arguments passed to underlying plane classes.
+        Specific keyword arguments can be passed using surfaces
+        names as keys, i.e. 'xmin', 'xmax', 'ymin', 'ymax',
+        'zmin', 'zmax'.
 
     Attributes
     ----------
@@ -631,12 +716,25 @@ class RectangularParallelepiped(CompositeSurface):
             raise ValueError('ymin must be less than ymax')
         if zmin >= zmax:
             raise ValueError('zmin must be less than zmax')
-        self.xmin = openmc.XPlane(x0=xmin, **kwargs)
-        self.xmax = openmc.XPlane(x0=xmax, **kwargs)
-        self.ymin = openmc.YPlane(y0=ymin, **kwargs)
-        self.ymax = openmc.YPlane(y0=ymax, **kwargs)
-        self.zmin = openmc.ZPlane(z0=zmin, **kwargs)
-        self.zmax = openmc.ZPlane(z0=zmax, **kwargs)
+        
+        surface_kwargs_names = list(
+            inspect.signature(openmc.Surface.__init__).parameters.keys()
+        )[1:] #exclude self
+        subkwargs = {k:v for k, v in kwargs.items() if k in surface_kwargs_names}
+
+        xmin_kwargs = kwargs.get("xmin", subkwargs)
+        xmax_kwargs = kwargs.get("xmax", subkwargs)
+        ymin_kwargs = kwargs.get("ymin", subkwargs)
+        ymax_kwargs = kwargs.get("ymax", subkwargs)
+        zmin_kwargs = kwargs.get("zmin", subkwargs)
+        zmax_kwargs = kwargs.get("zmax", subkwargs)
+
+        self.xmin = openmc.XPlane(x0=xmin, **xmin_kwargs)
+        self.xmax = openmc.XPlane(x0=xmax, **xmax_kwargs)
+        self.ymin = openmc.YPlane(y0=ymin, **ymin_kwargs)
+        self.ymax = openmc.YPlane(y0=ymax, **ymax_kwargs)
+        self.zmin = openmc.ZPlane(z0=zmin, **zmin_kwargs)
+        self.zmax = openmc.ZPlane(z0=zmax, **zmax_kwargs)
 
     def __neg__(self):
         return -self.xmax & +self.xmin & -self.ymax & +self.ymin & -self.zmax & +self.zmin
