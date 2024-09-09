@@ -6,7 +6,6 @@ from math import sqrt, pi, sin, cos, isclose
 from numbers import Real
 import warnings
 import operator
-import inspect
 
 import numpy as np
 from scipy.spatial import ConvexHull, Delaunay
@@ -35,16 +34,30 @@ class CompositeSurface(ABC):
         return surf
 
     @property
-    def boundary_type(self):
-        return getattr(self, self._surface_names[0]).boundary_type
+    def boundary_types(self):
+        """Getter of the boundary types of the underlying surfaces.
 
-    @boundary_type.setter
-    def boundary_type(self, boundary_type):
+        Returns
+        -------
+        dict
+            A dictionary of surface names and their boundary types.
+        """
+        return {name: getattr(self, name).boundary_type for name in self._surface_names}
+
+    @boundary_types.setter
+    def boundary_types(self, boundary_types):
+        """Setter.
+
+        Parameters
+        ----------
+        boundary_types : dict
+            Surface names and their boundary types.
+        """
         # Set boundary type on underlying surfaces, but not for ambiguity plane
         # on one-sided cones
         for name in self._surface_names:
             if name != 'plane':
-                getattr(self, name).boundary_type = boundary_type
+                getattr(self, name).boundary_type = boundary_types[name]
 
     def __repr__(self):
         return f"<{type(self).__name__} at 0x{id(self):x}>"
@@ -157,10 +170,8 @@ class CylinderSector(CompositeSurface):
 
         points = [p1, p2_plane1, p3_plane1, p2_plane2, p3_plane2]
 
-        surface_kwargs_names = list(
-            inspect.signature(openmc.Surface.__init__).parameters.keys()
-        )[1:] #exclude self
-        subkwargs = {k:v for k, v in kwargs.items() if k in surface_kwargs_names}
+        
+        subkwargs = {k:v for k, v in kwargs.items() if k not in self._surface_names}
 
         inner_cyl_kwargs = kwargs.get("inner_cyl", subkwargs)
         outer_cyl_kwargs = kwargs.get("outer_cyl", subkwargs)
@@ -376,10 +387,8 @@ class IsogonalOctagon(CompositeSurface):
         points = [p1_ur, p2_ur, p3_ur, p1_lr, p2_lr, p3_lr,
                   p1_ll, p2_ll, p3_ll, p1_ul, p2_ul, p3_ul]
         
-        surface_kwargs_names = list(
-            inspect.signature(openmc.Surface.__init__).parameters.keys()
-        )[1:] #exclude self
-        subkwargs = {k:v for k, v in kwargs.items() if k in surface_kwargs_names}
+        
+        subkwargs = {k:v for k, v in kwargs.items() if k not in self._surface_names}
         
         top_kwargs = kwargs.get("top", subkwargs)
         bottom_kwargs = kwargs.get("bottom", subkwargs)
@@ -530,10 +539,8 @@ class RightCircularCylinder(CompositeSurface):
         self.height = height
         self.radius = radius
 
-        surface_kwargs_names = list(
-            inspect.signature(openmc.Surface.__init__).parameters.keys()
-        )[1:] #exclude self
-        subkwargs = {k:v for k, v in kwargs.items() if k in surface_kwargs_names}
+        
+        subkwargs = {k:v for k, v in kwargs.items() if k not in self._surface_names}
 
         cyl_kwargs = kwargs.get("cyl", subkwargs)
         bottom_kwargs = kwargs.get("bottom", subkwargs)
@@ -598,8 +605,11 @@ class RightCircularCylinder(CompositeSurface):
             return cyl, torus, plane
 
         if upper_fillet_radius > 0. or lower_fillet_radius > 0.:
-            if 'boundary_type' in kwargs:
-                if kwargs['boundary_type'] == 'periodic':
+            if (
+                (cyl_kwargs.get('boundary_type', '') == 'periodic')
+                or (bottom_kwargs.get('boundary_type', '') == 'periodic')
+                or (top_kwargs.get('boundary_type', '') == 'periodic')
+            ):
                     raise ValueError('Periodic boundary conditions not permitted when '
                                      'rounded corners are used.')
 
@@ -717,10 +727,8 @@ class RectangularParallelepiped(CompositeSurface):
         if zmin >= zmax:
             raise ValueError('zmin must be less than zmax')
         
-        surface_kwargs_names = list(
-            inspect.signature(openmc.Surface.__init__).parameters.keys()
-        )[1:] #exclude self
-        subkwargs = {k:v for k, v in kwargs.items() if k in surface_kwargs_names}
+        
+        subkwargs = {k:v for k, v in kwargs.items() if k not in self._surface_names}
 
         xmin_kwargs = kwargs.get("xmin", subkwargs)
         xmax_kwargs = kwargs.get("xmax", subkwargs)
@@ -762,7 +770,10 @@ class OrthogonalBox(CompositeSurface):
         assumed that the box will be infinite along the vector normal to the
         plane specified by ``a1`` and ``a2``.
     **kwargs
-        Keyword arguments passed to underlying plane classes
+        Keyword arguments passed to underlying plane classes.
+        Specific keyword arguments can be passed using surfaces
+        names as keys, i.e. 'ax1_min', 'ax1_max', 'ax2_min',
+        'ax2_max', 'ax3_min', 'ax3_max'.
 
     Attributes
     ----------
@@ -794,14 +805,22 @@ class OrthogonalBox(CompositeSurface):
         p6 = v + a2 + a3
         p7 = v + a1 + a3
 
+        subkwargs = {k:v for k, v in kwargs.items() if k not in self._surface_names}
+        ax1_min_kwargs = kwargs.get("ax1_min", subkwargs)
+        ax1_max_kwargs = kwargs.get("ax1_max", subkwargs)
+        ax2_min_kwargs = kwargs.get("ax2_min", subkwargs)
+        ax2_max_kwargs = kwargs.get("ax2_max", subkwargs)
+
         # Generate 6 planes of box
-        self.ax1_min = openmc.Plane.from_points(p1, p3, p4, **kwargs)
-        self.ax1_max = openmc.Plane.from_points(p2, p5, p7, **kwargs)
-        self.ax2_min = openmc.Plane.from_points(p1, p4, p2, **kwargs)
-        self.ax2_max = openmc.Plane.from_points(p3, p6, p5, **kwargs)
+        self.ax1_min = openmc.Plane.from_points(p1, p3, p4, **ax1_min_kwargs)
+        self.ax1_max = openmc.Plane.from_points(p2, p5, p7, **ax1_max_kwargs)
+        self.ax2_min = openmc.Plane.from_points(p1, p4, p2, **ax2_min_kwargs)
+        self.ax2_max = openmc.Plane.from_points(p3, p6, p5, **ax2_max_kwargs)
         if has_a3:
-            self.ax3_min = openmc.Plane.from_points(p1, p2, p3, **kwargs)
-            self.ax3_max = openmc.Plane.from_points(p4, p7, p6, **kwargs)
+            ax3_min_kwargs = kwargs.get("ax3_min", subkwargs)
+            ax3_max_kwargs = kwargs.get("ax3_max", subkwargs)
+            self.ax3_min = openmc.Plane.from_points(p1, p2, p3, **ax3_min_kwargs)
+            self.ax3_max = openmc.Plane.from_points(p4, p7, p6, **ax3_max_kwargs)
 
         # Make sure a point inside the box produces the correct senses. If not,
         # flip the plane coefficients so it does.
